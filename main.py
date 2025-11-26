@@ -3,15 +3,15 @@ import json
 import aiofiles
 
 from pathlib import Path
+from mcp import ClientSession
 from mcp.server.fastmcp import FastMCP
 
-from source.entity import LinearInput
+# from source.entity import LinearInput
 from source.smithery_tools import linear_tools
 
 mcp = FastMCP(
     name="Save Code Tool MCP",
-    host="0.0.0.0",
-    port=8050,
+    port=8001,
 )
 
 
@@ -20,7 +20,11 @@ mcp = FastMCP(
     description="Call linear and slack tools to get issues and slack messages, then ",
 )
 async def auto_linear(
-    input_args: LinearInput
+    after: str | None = None,
+    limit: int | None = None,
+    before: str | None = None,
+    orderBy: str | None = None,
+    project: str | None = None,
 ):
     # Get the linear session
     try:
@@ -29,11 +33,9 @@ async def auto_linear(
         if not linear_client:
             return "Error getting linear client"
 
-        # print(f"Linear client initialized")
 
         # Use the context manager properly
         async with linear_client as (read, write, _):
-            from mcp import ClientSession
 
             async with ClientSession(read, write) as linear_session:
                 # Initialize the connection
@@ -42,23 +44,12 @@ async def auto_linear(
                 linear_tools_list = await linear_session.list_tools()
                 if not linear_tools_list:
                     return "Error getting linear tools list"
-                # print(f"Got Linear tools list")
                 args = {
-                    "team": input_args.team,
-                    "after": input_args.after,
-                    "cycle": input_args.cycle,
-                    "label": input_args.label,
-                    "limit": input_args.limit,
-                    "query": input_args.query,
-                    "state": input_args.state,
-                    "before": input_args.before,
-                    "orderBy": input_args.orderBy,
-                    "project": input_args.project,
-                    "assignee": input_args.assignee,
-                    "parentId": input_args.parentId,
-                    "createdAt": input_args.createdAt,
-                    "updatedAt": input_args.updatedAt,
-                    "includeArchived": input_args.includeArchived,
+                    "assignee": "me",
+                    "after": after,
+                    "limit": limit,
+                    "before": before,
+                    "orderBy": orderBy,
                 }
 
                 args = {k: v for k, v in args.items() if v is not None}
@@ -69,33 +60,29 @@ async def auto_linear(
                 )
 
                 issue_results = json.loads(issue_results)  # dict
-                # print(f"Tool result: {issue_results}, length: {len(issue_results)}")
 
                 # Validate we have issues
                 if not issue_results or len(issue_results) == 0:
                     return "No issues found in Linear"
 
-                # Sort by priority (lower value = higher priority, so we want ascending order)
-                sorted_issues = sorted(
-                    issue_results,
-                    key=lambda x: x.get("priority", {}).get("value", float("inf")),
-                )
 
                 issue_id, issue_description = None, None
 
                 # If project is specified, try to find that specific issue
-                if input_args.project:
-                    for issue in sorted_issues:
-                        if issue.get("identifier") == input_args.project:
+                if project:
+                    for issue in issue_results:
+                        if issue.get("identifier") == project:
                             issue_id = issue["id"]
                             issue_description = issue.get(
                                 "description", "No description available"
                             )
-                            # print(
-                            #     f"Found specific issue: {issue['id']}, identifier: {issue['identifier']}"
-                            # )
                             break
 
+                # # Sort by priority (lower value = higher priority, so we want ascending order)
+                sorted_issues = sorted(
+                    issue_results,
+                    key=lambda x: x.get("priority", {}).get("value", float("inf")),
+                )
                 # If no specific project found or project not specified, get the highest priority issue
                 if not issue_id:
                     # Get the first issue (highest priority after sorting)
@@ -104,9 +91,6 @@ async def auto_linear(
                     issue_description = first_issue.get(
                         "description", "No description available"
                     )
-                    # print(
-                    #     f"Using highest priority issue: {issue_id}, identifier: {first_issue.get('identifier', 'N/A')}"
-                    # )
 
                 if not issue_id:
                     return "Could not determine issue to process"
@@ -117,24 +101,16 @@ async def auto_linear(
                 )
                 issue_comments = json.loads(issue_comments.content[0].text)
 
-                # for comment in issue_comments:
-                #     print(
-                #         f"Comment: {comment['id']}, content: {comment.get('body', comment.get('content', 'No content'))}"
-                #     )
-                # print(f"Issue comments: {issue_comments}")
-
                 # Make a data structure to save the issue description and comments and feed it to a agent
                 data_structure = {
                     "issue_description": issue_description,
                     "issue_comments": issue_comments,
                 }
-                # print(f"Data structure: {data_structure}")
                 return data_structure
     except Exception as e:
         import traceback
 
         error_details = traceback.format_exc()
-        # print(f"Full error traceback: {error_details}")
         return f"Error in auto_linear tool: {e}\nDetails: {error_details}"
 
 
@@ -144,14 +120,14 @@ async def auto_linear(
 )
 async def save_file(
     file_name: str,
-    file_content: str ,
+    file_content: str,
 ):
     try:
-        if not file_name: 
+        if not file_name:
             return "File name is required"
         if not file_content:
             return "File content is required"
-        
+
         path = Path(file_name)
         file_name = path.with_suffix(".md")
 
@@ -162,19 +138,15 @@ async def save_file(
     except Exception as e:
         return f"Error saving file: {e}"
 
-
 @mcp.prompt()
 def prompt():
-    return (
-        f"Call auto_linear tool to receive relevant issues and comments to process. After you have finished processing the issues, call save_file tool to save the file to the local directory."
-    )
+    return f"Call auto_linear tool to receive relevant issues and comments to process. After you have finished processing the issues, call save_file tool to save the file to the local directory."
+
 
 async def test_auto_linear():
     """Test function to run auto_linear directly"""
-    # print("Testing auto_linear function...")
-    result = await auto_linear()
-    # print(f"Result: {result}")
-    save_file(file_name="issues.json", file_content=result)    
+    result = await auto_linear(limit=1)
+    await save_file(file_name="issues.json", file_content=json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
@@ -185,6 +157,4 @@ if __name__ == "__main__":
         asyncio.run(test_auto_linear())
     else:
         # Run as MCP server
-        # print("Starting MCP server on port 8050...")
-        # print("To test the function directly, run: python main.py test")
-        mcp.run()
+        mcp.run(transport="streamable-http")
